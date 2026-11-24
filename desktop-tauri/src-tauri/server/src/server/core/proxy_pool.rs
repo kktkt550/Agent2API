@@ -62,8 +62,16 @@ fn is_clash(item: &Value) -> bool {
     item.get("source").and_then(Value::as_str) == Some("clash")
 }
 
+/// relay 条目（Cloudflare Relay 中转）：`source = "relay"`，条目上是完整
+/// https URL（`url` 字段）而非 host:port。判定口径见 `relay_proxy` 模块头。
+fn is_relay(item: &Value) -> bool {
+    item.get("source").and_then(Value::as_str) == Some("relay")
+        || (item.get("source").and_then(Value::as_str) == Some("manual")
+            && item.get("protocol").and_then(Value::as_str) == Some(super::relay_proxy::PROTOCOL))
+}
+
 fn is_supported(item: &Value) -> bool {
-    is_manual(item) || is_clash(item)
+    is_manual(item) || is_clash(item) || is_relay(item)
 }
 
 pub(crate) fn raw_items() -> Vec<Value> {
@@ -122,6 +130,13 @@ fn normalize_item(input: &Value, existing: Option<&Value>) -> Result<Value, Stri
     if is_clash(input) {
         return Err("EasyClash 出口由「同步 EasyClash」自动导入，不能手工新建".to_string());
     }
+    // relay 条目走自己的归一化（字段完全不同：url 而非 host/port）
+    let source = clean_string(object.get("source"), 10);
+    if source == "relay"
+        || (source == "manual" && object.get("protocol").and_then(Value::as_str) == Some(super::relay_proxy::PROTOCOL))
+    {
+        return normalize_relay_item(input, existing);
+    }
     if !is_manual(input) {
         return Err(RETIRED_HINT.to_string());
     }
@@ -179,6 +194,72 @@ fn new_id() -> String {
     format!("px_{}_{suffix:08x}", logging::now_ms())
 }
 
+/// relay 条目归一化（新增 / 编辑共用）。
+///
+/// 与 host:port 条目的字段完全不同：`url` 是完整 https relay 地址（过七步
+/// SSRF 校验），`region` 是可选的区域 hint，`cfAccountId` / `cfApiToken`
+/// 是**明文**记住的部署凭据（用户明确选择不加密）。列表回显见
+/// `describe_item` —— Token 不进列表（只在「切地区」时按需回填），其余字段
+/// （含 Account ID）原样展示。
+fn normalize_relay_item(input: &Value, existing: Option<&Value>) -> Result<Value, String> {
+    let object = input.as_object().ok_or("代理条目必须是对象")?;
+    let name = clean_string(object.get("name"), MAX_NAME_LENGTH);
+    if name.is_empty() {
+        return Err("请填写代理名称".to_string());
+    }
+    let url = super::relay_proxy::normalize_relay_url(object.get("url").and_then(Value::as_str).unwrap_or(""))
+        .ok_or_else(|| {
+            "relay 地址必须是公网 https 地址，且不能包含用户名密码或内网地址".to_string()
+        })?;
+    let region = object
+        .get("region")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !region.is_empty() && !super::relay_proxy::is_valid_region(region) {
+        return Err("未知区域".to_string());
+    }
+    let account_id = clean_string(object.get("cfAccountId"), MAX_LABEL_LENGTH);
+    let api_token = clean_string(object.get("cfApiToken"), MAX_LABEL_LENGTH);
+    let now = logging::now_ms();
+    let id = existing.map(|item| text_of(item, "id")).unwrap_or_default();
+    let id = if id.is_empty() { new_id() } else { id };
+    let created_at = existing
+        .and_then(|item| item.get("createdAt"))
+        .and_then(Value::as_i64)
+        .unwrap_or(now);
+    let last_test = existing
+        .and_then(|item| item.get("lastTest"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let previous = existing.unwrap_or(&Value::Null);
+    // 编辑时凭据留空 = 保留原值（与「切地区」的口径一致）
+    let account_id = if account_id.is_empty() {
+        text_of(previous, "cfAccountId")
+    } else {
+        account_id
+    };
+    let api_token = if api_token.is_empty() {
+        text_of(previous, "cfApiToken")
+    } else {
+        api_token
+    };
+    Ok(json!({
+        "id": id,
+        "name": name,
+        "source": "relay",
+        "enabled": !matches!(object.get("enabled"), Some(Value::Bool(false))),
+        "protocol": super::relay_proxy::PROTOCOL,
+        "url": url,
+        "region": region,
+        "cfAccountId": account_id,
+        "cfApiToken": api_token,
+        "createdAt": created_at,
+        "updatedAt": now,
+        "lastTest": last_test,
+    }))
+}
+
 pub fn is_enabled(item: &Value) -> bool {
     is_supported(item)
         && !matches!(item.get("enabled"), Some(Value::Bool(false)))
@@ -191,6 +272,23 @@ pub fn resolve_item(item: &Value) -> Option<ProxyResolution> {
             "source": "clash",
             "listenerUid": text_of(item, "listenerUid"),
         })));
+    }
+    if is_relay(item) {
+        // relay 条目：URL 已在写入时过七步校验，这里防手改库的坏数据再走一遍。
+        // ResolvedProxy 的 relay 形态：protocol = "relay"、host = 完整 URL、
+        // port = None（出站点据 protocol 分流，见 egress::relay_rewrite）。
+        let url = super::relay_proxy::normalize_relay_url(&text_of(item, "url"))
+            .or_else(|| super::relay_proxy::normalize_relay_url(&text_of(item, "host")))?;
+        return Some(ProxyResolution::Resolved(crate::server::core::proxies::ResolvedProxy {
+            source: "pool".to_string(),
+            protocol: super::relay_proxy::PROTOCOL.to_string(),
+            host: url,
+            port: None,
+            username: String::new(),
+            password: String::new(),
+            label: String::new(),
+            non_direct: false,
+        }));
     }
     if !is_manual(item) {
         return Some(ProxyResolution::Failed(RETIRED_HINT.to_string()));
@@ -245,6 +343,10 @@ fn resolve_entry(
 }
 
 fn describe_item(item: &Value) -> Value {
+    // relay 条目是另一种形状（url/region/凭据），单独投影
+    if is_relay(item) {
+        return describe_relay_item(item);
+    }
     let (resolved, resolve_error) = match resolve_item(item) {
         Some(ProxyResolution::Resolved(proxy)) => (
             json!({ "protocol": proxy.protocol, "host": proxy.host, "port": proxy.port_json(), "label": proxy.label }),
@@ -267,6 +369,41 @@ fn describe_item(item: &Value) -> Value {
         "username": text_of(item, "username"),
         "password": text_of(item, "password"),
         "nonDirect": item.get("nonDirect").and_then(Value::as_bool).unwrap_or(false),
+        "createdAt": item.get("createdAt").cloned().unwrap_or(Value::from(0)),
+        "updatedAt": item.get("updatedAt").cloned().unwrap_or(Value::from(0)),
+        "lastTest": item.get("lastTest").cloned().unwrap_or(Value::Null),
+        "resolved": resolved,
+        "resolveError": resolve_error,
+    })
+}
+
+/// relay 条目的列表投影。
+///
+/// 与 `describe_item` 的 host:port 形状不同：`url` / `region` / 明文凭据
+/// （用户选择不加密，Account ID 原样回显用于「切地区」表单预填）；
+/// **cfApiToken 不回显**（只在部署 / 切地区时由前端显式填写或选择沿用已存），
+/// 列表只回 `credentialsSaved` 布尔位。
+fn describe_relay_item(item: &Value) -> Value {
+    let (resolved, resolve_error) = match resolve_item(item) {
+        Some(ProxyResolution::Resolved(proxy)) => (
+            json!({ "protocol": proxy.protocol, "host": proxy.host, "port": Value::Null, "label": proxy.label }),
+            Value::Null,
+        ),
+        Some(ProxyResolution::Failed(reason)) => (Value::Null, Value::String(reason)),
+        None => (Value::Null, Value::String("配置不完整".to_string())),
+    };
+    json!({
+        "id": text_of(item, "id"),
+        "name": text_of(item, "name"),
+        "source": "relay",
+        "enabled": is_enabled(item),
+        "sourceEnabled": !matches!(item.get("enabled"), Some(Value::Bool(false))),
+        "localDisabled": matches!(item.get("localDisabled"), Some(Value::Bool(true))),
+        "protocol": super::relay_proxy::PROTOCOL,
+        "url": text_of(item, "url"),
+        "region": text_of(item, "region"),
+        "cfAccountId": text_of(item, "cfAccountId"),
+        "credentialsSaved": !text_of(item, "cfApiToken").is_empty(),
         "createdAt": item.get("createdAt").cloned().unwrap_or(Value::from(0)),
         "updatedAt": item.get("updatedAt").cloned().unwrap_or(Value::from(0)),
         "lastTest": item.get("lastTest").cloned().unwrap_or(Value::Null),

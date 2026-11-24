@@ -480,6 +480,10 @@ const BRIDGE_JS: &str = r#"
     removeProxyPoolItem: id => call('POST', '/api/proxies/pool/remove', { id: String(id || '') }),
     testProxyPoolItem: id => call('POST', '/api/proxies/pool/test', { id: String(id || '') }),
     syncClashToProxyPool: () => call('POST', '/api/proxies/pool/sync-clash', {}),
+    // relay 条目的部署 / 区域切换（与 web_shim.rs 的同名方法成对存在）
+    deployRelayWorker: payload => call('POST', '/api/proxies/pool/deploy-relay', payload || {}),
+    switchRelayRegion: payload => call('POST', '/api/proxies/pool/region-relay', payload || {}),
+    getRelayRegions: () => call('GET', '/api/proxies/relay-regions'),
     // ── 代理设置（「网络代理」页的设置弹窗：测试目标网址）──
     // 与 web_shim.rs 的同名方法成对存在（教训同上）。契约见 `api::proxies`
     // 的模块头 settings 两条：GET 带 `defaults`（弹窗的默认值读它），

@@ -244,6 +244,149 @@ pub async fn settings_get() -> Response {
     ok_json(proxy_settings::get())
 }
 
+// ─── relay 条目的部署 / 切地区（Cloudflare Relay 中转）─────────────
+
+/// 一键部署 Relay Worker：调 Cloudflare API 上传内联脚本并取 workers.dev
+/// URL，**成功后自动登记/更新代理池条目并启用**（已存在同名条目则更新
+/// URL 与 region）。请求体：`{cfAccountId, cfApiToken, projectName,
+/// region?, name?}`。凭据**明文**存条目（用户选择不加密）；`name` 留空
+/// 用 Worker 名称。
+pub async fn pool_deploy_relay(body: &Bytes) -> Response {
+    let payload = match parse_body(body) {
+        Ok(value) => value,
+        Err(_) => return management_error(400, "请求内容不是有效 JSON"),
+    };
+    let account_id = payload.get("cfAccountId").and_then(Value::as_str).unwrap_or("").trim();
+    let api_token = payload.get("cfApiToken").and_then(Value::as_str).unwrap_or("").trim();
+    if account_id.is_empty() || api_token.is_empty() {
+        return management_error(400, "请填写 Cloudflare Account ID 与 API Token");
+    }
+    let project_name = payload
+        .get("projectName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("agent2api-relay");
+    let region = payload.get("region").and_then(Value::as_str).unwrap_or("").trim();
+    if !crate::server::core::relay_proxy::is_valid_project_name(project_name) {
+        return management_error(400, "Worker 名称只能包含小写字母、数字和连字符，且以字母或数字开头");
+    }
+    if !crate::server::core::relay_proxy::is_valid_region(region) {
+        return management_error(400, "未知区域");
+    }
+    // 部署失败：完全不写库，避免半条脏条目（与 Coding2API 同口径）
+    let url = match crate::server::core::relay_proxy::deploy_relay_worker(account_id, api_token, project_name, region).await {
+        Ok(url) => url,
+        Err(message) => return management_error(502, message),
+    };
+    let normalized = match crate::server::core::relay_proxy::normalize_relay_url(&url) {
+        Some(url) => url,
+        None => return management_error(502, "部署成功但返回的地址无效"),
+    };
+    let name = payload
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(project_name);
+    // 部署成功 → 登记或更新条目（已存在同名 id 的条目则更新 URL / region / 凭据并启用）
+    let item = json!({
+        "id": project_name,
+        "name": name,
+        "source": "relay",
+        "url": normalized,
+        "region": region,
+        "cfAccountId": account_id,
+        "cfApiToken": api_token,
+        "enabled": true,
+    });
+    // upsert：先试更新，不存在再新建（update 失败于「不存在」时回落 create）
+    if proxy_pool::update(&item).is_err() {
+        if let Err(message) = proxy_pool::create(&item) {
+            return management_error(400, message);
+        }
+    }
+    logging::log("[Proxies]", &format!("✅ Relay「{name}」部署完成（区域 {}）", if region.is_empty() { "自动" } else { region }));
+    let data = json!({
+        "deployUrl": normalized,
+        "region": region,
+        "items": proxy_pool::list(),
+    });
+    ok_json(data)
+}
+
+/// 切换 Relay Worker 的部署区域：**凭据留空则用条目里已存的**（用户选择
+/// 不加密，所以总能取到；取不到就 400 提示先填部署表单）。projectName
+/// 不变 → URL 不变，只重传脚本换 placements。
+pub async fn pool_region_relay(body: &Bytes) -> Response {
+    let payload = match parse_body(body) {
+        Ok(value) => value,
+        Err(_) => return management_error(400, "请求内容不是有效 JSON"),
+    };
+    let id = payload.get("id").and_then(Value::as_str).unwrap_or("").trim();
+    if id.is_empty() {
+        return management_error(400, "缺少代理 id");
+    }
+    let region = payload.get("region").and_then(Value::as_str).unwrap_or("").trim();
+    if !crate::server::core::relay_proxy::is_valid_region(region) {
+        return management_error(400, "未知区域");
+    }
+    // 从池里取条目（拿 projectName 与已存凭据）
+    let items = proxy_pool::list();
+    let Some(item) = items.iter().find(|item| item.get("id").and_then(Value::as_str) == Some(id)) else {
+        return management_error(404, "代理条目不存在");
+    };
+    if item.get("source").and_then(Value::as_str) != Some("relay") {
+        return management_error(400, "只有 relay 类型的代理支持切换区域");
+    }
+    let account_id = payload
+        .get("cfAccountId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(item.get("cfAccountId").and_then(Value::as_str).unwrap_or(""));
+    let api_token = payload
+        .get("cfApiToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(item.get("cfApiToken").and_then(Value::as_str).unwrap_or(""));
+    if account_id.is_empty() || api_token.is_empty() {
+        return management_error(400, "该代理未记住凭据，请填写 Cloudflare Account ID 与 API Token");
+    }
+    let project_name = id; // 部署时 id = Worker 名称
+    match crate::server::core::relay_proxy::deploy_relay_worker(account_id, api_token, project_name, region).await {
+        Ok(_) => {}
+        Err(message) => return management_error(502, message),
+    }
+    // 回写 region（凭据沿用已存）
+    let update = json!({
+        "id": id,
+        "name": item.get("name").and_then(Value::as_str).unwrap_or(id),
+        "source": "relay",
+        "url": item.get("url").and_then(Value::as_str).unwrap_or(""),
+        "region": region,
+        "cfAccountId": account_id,
+        "cfApiToken": api_token,
+        "enabled": item.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+    });
+    if let Err(message) = proxy_pool::update(&update) {
+        return management_error(400, message);
+    }
+    logging::log("[Proxies]", &format!("✅ Relay「{id}」区域已切换 -> {}", if region.is_empty() { "自动" } else { region }));
+    ok_json(json!({
+        "region": region,
+        "items": proxy_pool::list(),
+    }))
+}
+
+/// relay 条目的区域下拉元数据（前端渲染用）。
+pub async fn relay_regions() -> Response {
+    ok_json(json!({
+        "regions": crate::server::core::relay_proxy::region_options(),
+    }))
+}
+
 pub async fn settings_save(body: &Bytes) -> Response {
     let payload = match parse_body(body) {
         Ok(value) => value,
@@ -254,3 +397,4 @@ pub async fn settings_save(body: &Bytes) -> Response {
         Err(message) => management_error(400, message),
     }
 }
+

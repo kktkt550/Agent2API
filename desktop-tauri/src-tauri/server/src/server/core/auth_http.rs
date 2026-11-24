@@ -100,14 +100,20 @@ pub async fn send_raw(
     let client = egress::client_for(proxy);
     let trace = diagnostics::current().and_then(|trace| trace.request(method, url, proxy, false));
     let timeout_ms = diagnostics::request_timeout(timeout_ms);
+    // relay 出口：URL 改写 + 注入头（见 egress::relay_rewrite）。改写发生在
+    // builder 构造之前 —— 实际发出的 URL 与注入的头都指向 relay。
+    let relay = proxy.and_then(|proxy| egress::relay_rewrite(proxy, url));
+    let request_url = relay.as_ref().map_or(url, |relay| relay.url.as_str());
     let mut builder = match method {
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        "PATCH" => client.patch(url),
-        _ => client.get(url),
+        "POST" => client.post(request_url),
+        "PUT" => client.put(request_url),
+        "DELETE" => client.delete(request_url),
+        "PATCH" => client.patch(request_url),
+        _ => client.get(request_url),
     };
     builder = builder.header("Accept", "application/json");
+    let relay_headers = relay.as_ref().map(|relay| relay.apply_headers(headers));
+    let headers: &[(String, String)] = relay_headers.as_deref().unwrap_or(headers);
     for (key, value) in headers {
         builder = builder.header(key, value);
     }

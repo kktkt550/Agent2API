@@ -426,6 +426,11 @@ export type PoolItem = ProxyUsage & {
 /** 代理统一展示实时解析出的协议地址，供列表与下拉核对。 */
 export function poolItemAddress(item: PoolItem): string {
   const proxy = item.resolved || item
+  // relay 条目：resolved.host 是完整 https URL（后端 proxy_pool resolve 的
+  // relay 形态），直接展示；host:port 拼接对它不适用
+  if (proxy.protocol === 'relay') {
+    return proxy.host || item.resolved?.label || ''
+  }
   if (proxy.protocol && proxy.host && proxy.port) {
     const host = proxy.host.includes(':') && !proxy.host.startsWith('[') ? `[${proxy.host}]` : proxy.host
     return `${String(proxy.protocol).toLowerCase()}://${host}:${proxy.port}`

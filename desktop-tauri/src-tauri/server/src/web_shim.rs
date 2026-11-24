@@ -2011,6 +2011,10 @@ pub fn shim_js() -> &'static str {
     removeProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/remove', { id: String(id || '') }); },
     testProxyPoolItem: function (id) { return call('POST', '/api/proxies/pool/test', { id: String(id || '') }); },
     syncClashToProxyPool: function () { return call('POST', '/api/proxies/pool/sync-clash', {}); },
+    // relay 条目的部署 / 区域切换（与桌面壳 bridge.rs 的同名方法成对存在）
+    deployRelayWorker: function (payload) { return call('POST', '/api/proxies/pool/deploy-relay', payload || {}); },
+    switchRelayRegion: function (payload) { return call('POST', '/api/proxies/pool/region-relay', payload || {}); },
+    getRelayRegions: function () { return call('GET', '/api/proxies/relay-regions'); },
     // 代理设置（「网络代理」页的设置弹窗；与桌面壳 bridge.rs 的同名方法
     // 成对存在，契约见 api::proxies 的模块头 settings 两条）
     getProxySettings: function () { return call('GET', '/api/proxies/settings'); },

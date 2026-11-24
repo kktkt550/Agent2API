@@ -382,7 +382,17 @@ pub fn client_for_system_proxy() -> Arc<reqwest::Client> {
 /// 「持锁不阻塞」—— 所以在锁外构造，锁内只做一次查表 + 插入。
 /// 并发构造同一个出口时两次都建 Client（各自持自己的连接池），
 /// 后者覆盖前者 —— 最坏结果是多建了一个池，不影响正确性。
+///
+/// ── relay 出口 ────────────────────────────────────────────
+/// `protocol == "relay"` 的条目**不走代理层**：`chain::endpoint` 只认
+/// http/socks5（会报「端口无效」），这里对 relay 形态直接返回直连 Client
+/// —— 真正的出站改写（URL 换成 relay + 注入头）在 [`relay_rewrite`]，
+/// 由调用方拿到 [`RelayTarget`] 后自行应用。relay 与代理互斥，不会双重代理。
 pub fn client_for(proxy: Option<&ResolvedProxy>) -> Arc<reqwest::Client> {
+    // relay 形态：直连 Client（改写走 relay_rewrite）
+    if proxy.is_some_and(|proxy| proxy.protocol == crate::server::core::relay_proxy::PROTOCOL) {
+        return client_for(None);
+    }
     let transport = match proxy.map(crate::server::core::proxies::chain::endpoint).transpose() {
         Ok(proxy) => proxy,
         Err(reason) => {
@@ -446,6 +456,72 @@ fn blocked_client() -> reqwest::Client {
     let blocked = reqwest::Proxy::custom(|_: &url::Url| Some("http://127.0.0.1:0"));
     reqwest::Client::builder().use_rustls_tls().no_proxy().proxy(blocked)
         .timeout(Duration::from_secs(1)).build().unwrap_or_default()
+}
+
+// ─── relay 出口（Cloudflare Relay 中转，见 core::relay_proxy 模块头）──────
+
+/// relay 改写的结果：调用方拿它替换请求的 URL 并附加两个头。
+#[derive(Clone, Debug)]
+pub struct RelayTarget {
+    /// 改写后的完整 URL（`{relay}/{原 path+query}`）
+    pub url: String,
+    /// 原请求的 origin（`x-relay-target` 头的值）
+    pub target_origin: String,
+    /// 原请求的 path+query（`x-relay-path` 头的值）
+    pub target_path: String,
+    /// relay 条目的展示名（日志用）
+    pub label: String,
+}
+
+impl RelayTarget {
+    /// 对一组请求头应用改写：追加 `x-relay-target` / `x-relay-path`，
+    /// 删掉 `host`（reqwest 按 URL 自动还原 Host；不删会把原上游的主机名
+    /// 发给 relay，Worker 再转发时也带着错 Host —— 与 Coding2API 的
+    /// `headers.delete("host")` 同一口径）。返回新的头列表。
+    pub fn apply_headers(&self, headers: &[(String, String)]) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = headers
+            .iter()
+            .filter(|(key, _)| !key.eq_ignore_ascii_case("host"))
+            .cloned()
+            .collect();
+        out.push(("x-relay-target".to_string(), self.target_origin.clone()));
+        out.push(("x-relay-path".to_string(), self.target_path.clone()));
+        out
+    }
+}
+
+/// 解析某次请求的 relay 目标；`proxy` 不是 relay 形态时返回 `None`
+/// （调用方走原路径）。URL 改写**零网络调用**：纯字符串拼接。
+///
+/// 判据与 [`client_for`] 的 relay 分支共用同一条（`protocol == "relay"`），
+/// 互斥语义靠这一处单点保证：命中 relay 的请求既不走代理层，也不走直连
+/// 原始 URL —— 连接目标和请求 URL 都换成了 relay。
+pub fn relay_rewrite(proxy: &ResolvedProxy, url: &str) -> Option<RelayTarget> {
+    if proxy.protocol != crate::server::core::relay_proxy::PROTOCOL {
+        return None;
+    }
+    let parsed = url::Url::parse(url).ok()?;
+    let relay_base = proxy.host.trim_end_matches('/').to_string();
+    let target_origin = format!(
+        "{}://{}{}",
+        parsed.scheme(),
+        match parsed.host_str()? {
+            host if host.contains(':') => format!("[{host}]"),
+            host => host.to_string(),
+        },
+        parsed.port().map(|port| format!(":{port}")).unwrap_or_default(),
+    );
+    let target_path = format!("{}{}", parsed.path(), parsed.query().map(|query| format!("?{query}")).unwrap_or_default());
+    Some(RelayTarget {
+        url: format!("{relay_base}{target_path}"),
+        target_origin,
+        target_path: target_path.clone(),
+        label: if proxy.label.is_empty() {
+            crate::server::core::relay_proxy::display_host(&relay_base)
+        } else {
+            proxy.label.clone()
+        },
+    })
 }
 
 /// 取 Client 缓存的锁；锁中毒（某次持锁 panic）不致命，接管内部数据继续用
@@ -524,12 +600,23 @@ async fn read_exit_ip(client: &reqwest::Client, proxy: Option<&ResolvedProxy>, t
 /// 重定向由客户端跟随，以最终响应状态为准。
 ///
 /// `target_url` 为 None 时用 `DEFAULT_TEST_URL`。
+///
+/// ── relay 出口 ────────────────────────────────────────────
+/// relay 条目走专属测试：直连请求 `{relay}/cdn-cgi/trace` 并注入
+/// `x-relay-target` / `x-relay-path`（与 Coding2API 的 test_relay_entry
+/// 同目标同口径）—— 也就是说测试打的是 **Worker 本身**，能确认 relay 可达；
+/// 出口 IP 就不查了（relay 的出口是 Cloudflare 边缘，读 trace 响应里的
+/// `ip=` 字段拿到的正是它）。
 pub async fn test_connectivity(
     proxy: Option<&ResolvedProxy>,
     timeout_ms: u64,
     target_url: Option<&str>,
 ) -> ConnectivityResult {
     let started = logging::now_ms();
+    // relay 形态：专属测试路径（trace 端点），不走 host:port 的 transport 解析
+    if let Some(proxy) = proxy.filter(|proxy| proxy.protocol == crate::server::core::relay_proxy::PROTOCOL) {
+        return test_relay(proxy, started).await;
+    }
     let url = target_url.unwrap_or(DEFAULT_TEST_URL);
     let transport = match proxy.map(crate::server::core::proxies::chain::endpoint).transpose() {
         Ok(proxy) => proxy,
@@ -572,6 +659,58 @@ pub async fn test_connectivity(
             error: Some(if error.is_timeout() {
                 // 照抄 Node 的文案（秒数四舍五入到整秒）
                 format!("连接超时（{} 秒）", (timeout_ms as f64 / 1000.0).round() as i64)
+            } else {
+                describe_error_detail(&error)
+            }),
+        },
+    }
+}
+
+/// relay 条目的连通性测试：直连请求 `{relay}/cdn-cgi/trace` 并注入
+/// `x-relay-target` / `x-relay-path` 头（目标固定为 `https://www.cloudflare.com`，
+/// 与 Coding2API 的 `test_relay_entry` 同口径）。10s 超时；成功时从 trace
+/// 响应里取 `ip=` 行作为出口 IP（relay 的出口就是 Cloudflare 边缘 IP）。
+async fn test_relay(proxy: &ResolvedProxy, started: i64) -> ConnectivityResult {
+    let relay_base = proxy.host.trim_end_matches('/').to_string();
+    let url = format!("{relay_base}{}", crate::server::core::relay_proxy::RELAY_TRACE_PATH);
+    let client = client_for(None);
+    let request = client
+        .get(&url)
+        .header("x-relay-target", crate::server::core::relay_proxy::RELAY_TRACE_TARGET)
+        .header("x-relay-path", crate::server::core::relay_proxy::RELAY_TRACE_PATH)
+        .timeout(Duration::from_millis(crate::server::core::relay_proxy::RELAY_TEST_TIMEOUT_MS));
+    match request.send().await {
+        Ok(response) => {
+            let status = response.status();
+            let duration_ms = logging::now_ms() - started;
+            let success = status.is_success();
+            let mut ip = String::new();
+            if success {
+                // trace 是纯文本，一行一个 `key=value`；`ip=` 行是出口 IP
+                if let Ok(text) = response.text().await {
+                    for line in text.lines() {
+                        if let Some(value) = line.strip_prefix("ip=") {
+                            ip = value.trim().to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+            ConnectivityResult {
+                success,
+                status: Some(status.as_u16()),
+                ip,
+                duration_ms,
+                error: (!success).then(|| format!("测试目标返回 HTTP {status}，relay 不可用")),
+            }
+        }
+        Err(error) => ConnectivityResult {
+            success: false,
+            status: None,
+            ip: String::new(),
+            duration_ms: logging::now_ms() - started,
+            error: Some(if error.is_timeout() {
+                "连接超时（10 秒）".to_string()
             } else {
                 describe_error_detail(&error)
             }),

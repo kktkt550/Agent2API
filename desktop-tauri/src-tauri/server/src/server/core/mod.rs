@@ -128,6 +128,10 @@ pub mod proxy_pool;
 pub mod proxy_rotate;
 pub mod proxy_settings;
 pub mod proxies;
+// Cloudflare Relay 中转（代理池的 relay 类型条目）：URL 归一化 + SSRF 校验、
+// Worker 一键部署（multipart 上传 + subdomain 解析）、区域白名单；出站点
+// 的 URL 改写与头注入见 egress::relay_rewrite，见该模块头
+pub mod relay_proxy;
 pub mod routing;
 pub(crate) mod routing_groups;
 pub mod routing_order;

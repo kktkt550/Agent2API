@@ -116,6 +116,14 @@ fn entry_ready(item: &Value) -> Result<(), String> {
             None => Err("条目地址不完整".to_string()),
         };
     }
+    // relay 条目：url 写入时已过校验，这里防手改库的坏数据
+    if item.get("source").and_then(Value::as_str) == Some("relay") {
+        return if crate::server::core::relay_proxy::normalize_relay_url(&text_of(item, "url")).is_some() {
+            Ok(())
+        } else {
+            Err("relay 地址无效".to_string())
+        };
+    }
     let host = text_of(item, "host");
     let port = item.get("port").and_then(Value::as_u64).unwrap_or(0);
     if host.is_empty() || !(1..=65535).contains(&port) {

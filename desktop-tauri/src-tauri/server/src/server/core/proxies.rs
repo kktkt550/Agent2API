@@ -200,8 +200,37 @@ pub fn normalize_account_proxy(input: &Value) -> Result<Option<Value>, ProxyConf
         }
         return Ok(Some(json!({ "source": "pool", "proxyId": proxy_id })));
     }
-    if source != "custom" {
+    if source != "custom" && source != crate::server::core::relay_proxy::PROTOCOL {
         return Err(ProxyConfigError::new(format!("不支持的代理来源: {source}")));
+    }
+
+    // relay 形态（「网络代理」弹窗测未保存的 relay 条目）：字段是 url，
+    // 归一成 relay 的 ResolvedProxy 形态（host = 完整 URL、port = None）。
+    if source == crate::server::core::relay_proxy::PROTOCOL {
+        let url = crate::server::core::relay_proxy::normalize_relay_url(
+            object.get("url").and_then(Value::as_str).unwrap_or(""),
+        )
+        .ok_or_else(|| {
+            ProxyConfigError::new("relay 地址必须是公网 https 地址，且不能包含用户名密码或内网地址")
+        })?;
+        let label = {
+            let cleaned = clean_string(object.get("label"), MAX_LABEL_LENGTH);
+            if cleaned.is_empty() {
+                crate::server::core::relay_proxy::display_host(&url)
+            } else {
+                cleaned
+            }
+        };
+        return Ok(Some(json!({
+            "source": "relay",
+            "protocol": crate::server::core::relay_proxy::PROTOCOL,
+            "host": url,
+            "port": Value::Null,
+            "username": "",
+            "password": "",
+            "label": label,
+            "nonDirect": false,
+        })));
     }
 
     let protocol = {

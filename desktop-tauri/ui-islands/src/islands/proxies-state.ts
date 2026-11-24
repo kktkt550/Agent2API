@@ -72,6 +72,23 @@ export type ProxyPoolBridge = {
   /** 连通性测试目标网址 */
   getProxySettings?: () => Promise<ProxySettings | null | undefined>
   saveProxySettings?: (payload: Record<string, unknown>) => Promise<ProxySettings | null | undefined>
+  /** relay 一键部署（Cloudflare Relay Worker）：成功返回 {deployUrl, region, items} */
+  deployRelayWorker?: (payload: {
+    cfAccountId: string
+    cfApiToken: string
+    projectName?: string
+    region?: string
+    name?: string
+  }) => Promise<{ deployUrl?: string; region?: string; items?: unknown[] } | null | undefined>
+  /** relay 切换部署区域：成功返回 {region, items} */
+  switchRelayRegion?: (payload: {
+    id: string
+    region?: string
+    cfAccountId?: string
+    cfApiToken?: string
+  }) => Promise<{ region?: string; items?: unknown[] } | null | undefined>
+  /** relay 区域下拉元数据：{regions: [{value, label}]} */
+  getRelayRegions?: () => Promise<{ regions?: Array<{ value: string; label: string }> } | null | undefined>
 }
 
 export type ProxySharedWindow = {

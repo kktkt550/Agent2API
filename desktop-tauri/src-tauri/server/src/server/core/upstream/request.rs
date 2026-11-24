@@ -158,14 +158,100 @@ pub async fn read_upstream_error(
 pub async fn send_chat_request(
     plan: &TransportRequest,
 ) -> Result<reqwest::Response, UpstreamRequestError> {
-    // 客户端三选一：账号级代理 → 跟随系统代理（本家能力位，见
-    // `TransportRequest::system_proxy_when_unset`）→ 直连
+    // relay 出口（protocol == "relay"）：URL 改写 + 注入头，直连 Client
+    //（不走代理层 —— relay 与 host:port 代理互斥，见 egress::relay_rewrite）。
+    let relay = plan.proxy.as_ref().and_then(|proxy| egress::relay_rewrite(proxy, &plan.url));
     let client = match plan.proxy.as_ref() {
         Some(proxy) => egress::client_for(Some(proxy)),
         None if plan.system_proxy_when_unset => egress::client_for_system_proxy(),
         None => egress::client_for(None),
     };
+    if let Some(relay) = &relay {
+        return send_chat_with_relay(plan, &client, relay).await;
+    }
     send_chat_with_client(plan, &client).await
+}
+
+/// relay 版的发送：URL 换成 relay、头注入（删 host），其余（multipart /
+/// body / UA / 超时 / 错误归因）与 [`send_chat_with_client`] 逐字同口径。
+/// 出口说明（失败文案的 `{via}`）用 relay 标签。
+async fn send_chat_with_relay(
+    plan: &TransportRequest,
+    client: &reqwest::Client,
+    relay: &egress::RelayTarget,
+) -> Result<reqwest::Response, UpstreamRequestError> {
+    let multipart = plan.headers.iter().any(|(key, value)| {
+        key.eq_ignore_ascii_case("content-type") && value.eq_ignore_ascii_case("multipart/form-data")
+    });
+    let mut builder = client.post(&relay.url);
+    if multipart {
+        let form = super::multipart::request_form(&plan.payload).map_err(|message| {
+            UpstreamRequestError {
+                message,
+                reason: "上传请求构造失败".to_string(),
+                safe_to_retry: false,
+                network_failure: false,
+            }
+        })?;
+        builder = builder.multipart(form);
+    } else {
+        builder = builder.body(plan.payload.clone());
+    }
+    // 注入 relay 头（删 host）；multipart 的 content-type 由 reqwest 的
+    // multipart body 自带，原样注入会打架 —— 与直连版同一跳过口径
+    for (key, value) in relay.apply_headers(&plan.headers) {
+        if multipart && key.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+        builder = builder.header(key, value);
+    }
+    if let Some(timeout) = NO_TOTAL_TIMEOUT {
+        builder = builder.timeout(Duration::from_millis(timeout));
+    }
+    let via = if relay.label.is_empty() {
+        format!("经 relay {}", relay.url)
+    } else {
+        format!("经 relay {}", relay.label)
+    };
+    let headers_budget = headers_timeout();
+    match tokio::time::timeout(headers_budget, builder.send()).await {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => {
+            let reason = if error.is_timeout() {
+                format!("连接中超时({}秒)", connect_timeout_seconds())
+            } else {
+                "上游连接失败".to_string()
+            };
+            let message = if error.is_timeout() {
+                format!("连接中超时({}秒，出口 {via})", connect_timeout_seconds())
+            } else {
+                format!(
+                    "上游请求失败（{via}）: {}",
+                    egress::describe_error_detail(&error)
+                )
+            };
+            let safe_to_retry = error.is_connect() || error.is_builder();
+            let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+            let mut certificate_error = false;
+            while let Some(error) = cause {
+                let message = error.to_string().to_ascii_lowercase();
+                certificate_error |= message.contains("certificate") || message.contains("invalid peer")
+                    || message.contains("unknownissuer") || message.contains("certnotvalid");
+                cause = error.source();
+            }
+            let network_failure = !certificate_error && !error.is_builder() && (error.is_connect() || error.is_timeout());
+            Err(UpstreamRequestError { message, reason, safe_to_retry, network_failure })
+        }
+        Err(_elapsed) => {
+            let seconds = headers_budget.as_secs();
+            Err(UpstreamRequestError {
+                reason: format!("等待响应超时({seconds}秒)"),
+                message: format!("等待响应超时({seconds}秒，出口 {via})"),
+                safe_to_retry: false,
+                network_failure: true,
+            })
+        }
+    }
 }
 
 pub(super) async fn send_chat_with_client(
