@@ -207,6 +207,10 @@ pub(super) fn start(state: &ServerState) -> Result<ServerHandle, PortConflict> {
     // 保留原来的后台整理触发点，不把它冒称为本轮HTTP关闭所跟踪的任务。
     if !shared.stopping() {
         state.start_background_maintenance();
+        // Cloudflare Tunnel 可选守护：AGENT2API_CLOUDFLARED_ENABLED=1 时按
+        // 平台自动下载 cloudflared 并以子进程方式拉起（默认转发到本网关）。
+        // 放在监听装配成功之后 —— 端口已绑定，隧道转发的目标此刻才是真的。
+        core::cloudflared::ensure_started(state.port);
         #[cfg(not(test))]
         drop(tokio::task::spawn_blocking(crate::server::core::agents::warm_up));
     }
@@ -456,6 +460,9 @@ async fn coordinate(shared: Arc<Shared>, mut guard: CoordinatorGuard) {
     shared.spawn_plugins(deadline);
     // 保留已有签到停止动作，不增加普通调度或原生会话清理的范围。
     core::auto_checkin::stop_global();
+    // cloudflared 子进程随网关一起退出（容器 stop / systemd stop / 桌面退出
+    // / Windows 服务停止都汇到这一处；杀不掉的兜底见 cloudflared 模块头）。
+    core::cloudflared::stop_global();
     shared.maybe_flush();
     let mut listener_joins_checked = false;
     loop {

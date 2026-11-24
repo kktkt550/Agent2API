@@ -14,6 +14,7 @@
 - [Docker](#docker)
 - [验证与客户端接入](#验证与客户端接入)
 - [网络访问](#网络访问)
+- [Cloudflare Tunnel（可选）](#cloudflare-tunnel可选)
 - [手机端](#手机端)
 
 ## 选哪种形态
@@ -280,6 +281,28 @@ print(resp.choices[0].message.content)
 桌面端默认只监听 `127.0.0.1`。在「设置 → 网关 → 网络访问」开启「允许其他设备访问网关」后，改为监听所有 IPv4 网卡（`0.0.0.0`）。**这不是仅限局域网的限制，也不会自动开放到公网**；实际可访问范围取决于网络路由、端口映射与防火墙。界面分开显示本机 API 地址和网页管理地址，连接时使用目标设备可达的地址，显示本机地址不代表公网可达。开启前必须注册面板管理员：管理接口要求管理员会话或网关 Key，API 调用需要启用的网关 Key，没有时自动创建一把「默认」Key。「同时开放网页管理面板」默认关闭。修改任一开关都需要重启应用。
 
 桌面安装包带有网页面板资源 `ui/`。开启「同时开放网页管理面板」后，能连接到网关的设备可用浏览器登录管理，访问范围与网关相同；关闭此项只停止提供网页界面，不影响 API 转发与本机桌面管理。**桌面窗口使用独立的本机会话，不需要额外网页登录**；浏览器访问面板时需要管理员账号登录。
+
+<a id="cloudflare-tunnel可选"></a>
+
+## Cloudflare Tunnel（可选）
+
+不想在服务器 / 家宽上开端口映射，又要让公网访问网关时，可以让网关自己拉一条 Cloudflare Tunnel：把 `AGENT2API_CLOUDFLARED_ENABLED=1` 交给网关进程（服务端写进 env 文件、Docker 写进 compose 的 `environment`），启动后它会自动完成剩下的事 —— 按平台从 [cloudflared 官方 Release](https://github.com/cloudflare/cloudflared/releases/latest) 下载可执行文件（落 `{数据目录}/bin/`，重启后复用不再重下），以**子进程**方式拉起隧道并随网关停机一起退出；子进程意外退出会按指数退避（3 秒起、封顶 5 分钟）自动重启。桌面 / 服务端 / Docker 三种形态都支持。
+
+| 变量 | 说明 |
+| --- | --- |
+| `AGENT2API_CLOUDFLARED_ENABLED` | 置 `1`（或 `true` / `on`）开启；默认关 |
+| `AGENT2API_CLOUDFLARED_TOKEN` | 具名隧道的 token（Cloudflare Zero Trust 控制台 → Networks → Tunnels → 创建 Tunnel 后获取）。设置后走 `tunnel run`，域名路由在控制台配；**token 只进子进程环境变量，不进命令行、不落日志**。未设置走 Quick Tunnel |
+| `AGENT2API_CLOUDFLARED_URL` | 隧道转发到的本机服务地址，默认 `http://127.0.0.1:{网关端口}`（即转发给网关自身，公网入口 `https://<你的域名>` 直通网关与面板） |
+| `AGENT2API_CLOUDFLARED_BIN` | 已有 cloudflared 可执行文件的路径；设置后跳过下载（离线环境 / GitHub 不可达时用） |
+| `AGENT2API_CLOUDFLARED_VERSION` | 钉住的版本号（如 `2026.11.2`）；默认 `latest` |
+| `AGENT2API_CLOUDFLARED_ARGS` | 追加给 cloudflared 的原始参数（空格分隔，双引号可包含空格的参数），排在内置参数之后 |
+
+**两种模式**：
+
+- **Quick Tunnel（临时隧道）**：不设 `AGENT2API_CLOUDFLARED_TOKEN` 时的默认模式，**无需 Cloudflare 账号**。启动后自动注册一条匿名隧道，公网地址（`https://xxx.trycloudflare.com`）会打在运行日志里（「日志」页搜 `Cloudflared`）。地址随机且**每次重启都会变**，只适合试用、临时演示和验证连通性。
+- **具名隧道（生产推荐）**：在 [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) 控制台创建 Tunnel，把页面上给的 token 填进 `AGENT2API_CLOUDFLARED_TOKEN`，并在控制台的 Public Hostname 里把你的域名路由到 `http://localhost:{网关端口}`（服务 URL 指向网关所在机器/容器）。地址固定、可控权限，客户端接入信息不变 —— 把 `base_url` 换成 `https://<你的域名>/v1` 即可。
+
+安全提醒：隧道会把网关**整个端口**（面板 + `/v1`）暴露到公网，面板有登录与人机验证、`/v1` 有 API Key 认证兜底；若只想暴露 API，把 `AGENT2API_PANEL_PORT` 设为分端口并在 Cloudflare 控制台只路由主端口，或用 `AGENT2API_CLOUDFLARED_URL` 把隧道指向一个不含管理面的地址。隧道出口本身不需要配代理。
 
 ## 手机端
 

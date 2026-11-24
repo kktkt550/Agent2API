@@ -51,6 +51,12 @@ services:
       # 写坏 / 越界会回落默认值，不会让服务起不来（详见 install 文档）。
       # AGENT2API_IMAGE_CACHE_MB: "64"
       # AGENT2API_IMAGE_COMPRESS_CACHE_MB: "64"
+      # 可选：Cloudflare Tunnel（置 1 开启）——启动后自动下载 cloudflared 并以
+      # 子进程方式拉起，随容器停机退出。生产配 AGENT2API_CLOUDFLARED_TOKEN
+      # （Zero Trust 控制台创建 Tunnel），留空走 Quick Tunnel 临时隧道（试用用）。
+      # 其余变量（URL / BIN / VERSION / ARGS）见 install 文档「Cloudflare Tunnel」。
+      # AGENT2API_CLOUDFLARED_ENABLED: "1"
+      # AGENT2API_CLOUDFLARED_TOKEN: ""
     volumes:
       # 全部状态（SQLite 库、配置、日志）都在这一个卷里
       - ./data:/data

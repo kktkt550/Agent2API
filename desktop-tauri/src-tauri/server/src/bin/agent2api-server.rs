@@ -44,6 +44,16 @@
 //!                               不报错，与其它配置项同一口径
 //!   AGENT2API_IMAGE_COMPRESS_CACHE_MB  会话图片压缩结果的内存缓存上限
 //!                               （MiB，默认 128，范围 8~4096，口径同上）
+//!   AGENT2API_CLOUDFLARED_ENABLED 置 `1`（或 true/on）开启 Cloudflare Tunnel
+//!                               守护：启动后自动按平台下载 cloudflared 并以
+//!                               子进程方式拉起，随服务停机退出（桌面形态同享，
+//!                               见 core/cloudflared.rs 的模块头与 install 文档）
+//!   AGENT2API_CLOUDFLARED_TOKEN 具名隧道 token（Zero Trust 控制台创建 Tunnel
+//!                               后获取）；未设置走 Quick Tunnel 临时隧道
+//!   AGENT2API_CLOUDFLARED_URL   隧道转发目标，默认转发给本网关自身
+//!   AGENT2API_CLOUDFLARED_BIN   已有 cloudflared 可执行文件路径（跳过下载）
+//!   AGENT2API_CLOUDFLARED_VERSION 钉住的 cloudflared 版本，默认 latest
+//!   AGENT2API_CLOUDFLARED_ARGS  追加给 cloudflared 的原始参数（空格分隔）
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;

@@ -14,6 +14,7 @@
 - [Docker](#docker)
 - [驗證與客戶端接入](#驗證與客戶端接入)
 - [網路存取](#網路存取)
+- [Cloudflare Tunnel（可選）](#cloudflare-tunnel可選)
 - [手機端](#手機端)
 
 ## 選哪種形態
@@ -282,6 +283,28 @@ print(resp.choices[0].message.content)
 桌面端預設只監聽 `127.0.0.1`。在「設定 → 閘道 → 網路存取」開啟「允許其他裝置存取閘道」後，改為監聽所有 IPv4 網路介面卡（`0.0.0.0`）。**這不是僅限區域網路的限制，也不會自動開放到公網**；實際存取範圍取決於網路路由、連接埠轉送與防火牆。介面分開顯示本機 API 位址和網頁管理位址，連線時使用目標裝置可達的位址，顯示本機位址不代表公網可達。開啟前必須註冊面板管理員：管理介面要求管理員工作階段或閘道 Key，API 呼叫需要已啟用的閘道 Key，沒有時自動建立一把「預設」Key。「同時開放網頁管理面板」預設關閉。修改任一開關都需要重新啟動應用程式。
 
 桌面安裝包含有網頁面板資源 `ui/`。開啟「同時開放網頁管理面板」後，能連線到閘道的裝置可用瀏覽器登入管理，存取範圍與閘道相同；關閉此項只停止提供網頁介面，不影響 API 轉發與本機桌面管理。**桌面視窗使用獨立的本機工作階段，不需要額外網頁登入**；瀏覽器存取面板時需要管理員帳號登入。
+
+<a id="cloudflare-tunnel可選"></a>
+
+## Cloudflare Tunnel（可選）
+
+不想在伺服器 / 家寬上開連接埠映射，又要讓公網存取閘道時，可以讓閘道自己拉一條 Cloudflare Tunnel：把 `AGENT2API_CLOUDFLARED_ENABLED=1` 交給閘道程序（伺服器端寫進 env 檔、Docker 寫進 compose 的 `environment`），啟動後它會自動完成剩下的事 —— 按平台從 [cloudflared 官方 Release](https://github.com/cloudflare/cloudflared/releases/latest) 下載可執行檔（落 `{資料目錄}/bin/`，重啟後複用不再重下），以**子程序**方式拉起隧道並隨閘道停機一起退出；子程序意外退出會按指數退避（3 秒起、封頂 5 分鐘）自動重啟。桌面 / 伺服器端 / Docker 三種形態都支援。
+
+| 變數 | 說明 |
+| --- | --- |
+| `AGENT2API_CLOUDFLARED_ENABLED` | 設 `1`（或 `true` / `on`）開啟；預設關 |
+| `AGENT2API_CLOUDFLARED_TOKEN` | 具名通道的 token（Cloudflare Zero Trust 控制台 → Networks → Tunnels → 建立通道後取得）。設定後走 `tunnel run`，域名路由在控制台配；**token 只進子程序環境變數，不進命令列、不落日誌**。未設定走 Quick Tunnel |
+| `AGENT2API_CLOUDFLARED_URL` | 通道轉發到的本機服務位址，預設 `http://127.0.0.1:{閘道連接埠}`（即轉發給閘道自身，公網入口 `https://<你的域名>` 直通閘道與面板） |
+| `AGENT2API_CLOUDFLARED_BIN` | 已有 cloudflared 可執行檔的路徑；設定後跳過下載（離線環境 / GitHub 不可達時用） |
+| `AGENT2API_CLOUDFLARED_VERSION` | 釘住的版本號（如 `2026.11.2`）；預設 `latest` |
+| `AGENT2API_CLOUDFLARED_ARGS` | 附加給 cloudflared 的原始參數（空格分隔，雙引號可包含空格的參數），排在內建參數之後 |
+
+**兩種模式**：
+
+- **Quick Tunnel（臨時通道）**：不設 `AGENT2API_CLOUDFLARED_TOKEN` 時的預設模式，**無需 Cloudflare 帳號**。啟動後自動註冊一條匿名通道，公網位址（`https://xxx.trycloudflare.com`）會打在執行日誌裡（「日誌」頁搜 `Cloudflared`）。位址隨機且**每次重啟都會變**，只適合試用、臨時展示和驗證連通性。
+- **具名通道（生產建議）**：在 [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) 控制台建立通道，把頁面上給的 token 填進 `AGENT2API_CLOUDFLARED_TOKEN`，並在控制台的 Public Hostname 裡把你的域名路由到 `http://localhost:{閘道連接埠}`（服務 URL 指向閘道所在機器 / 容器）。位址固定、可控權限，客戶端接入資訊不變 —— 把 `base_url` 換成 `https://<你的域名>/v1` 即可。
+
+安全提醒：通道會把閘道**整個連接埠**（面板 + `/v1`）暴露到公網，面板有登入與人機驗證、`/v1` 有 API Key 認證把關；若只想暴露 API，把 `AGENT2API_PANEL_PORT` 設為分連接埠並在 Cloudflare 控制台只路由主連接埠，或用 `AGENT2API_CLOUDFLARED_URL` 把通道指向一個不含管理面的位址。通道出口本身不需要配代理。
 
 ## 手機端
 

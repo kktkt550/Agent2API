@@ -1,0 +1,160 @@
+name: linux-server-build
+
+# 自包含的 Linux 服务端 / Docker 构建工作流（不依赖作者私有构建仓库）。
+#
+# ── 出什么 ──────────────────────────────────────────────────
+#   · linux-server-amd64 / linux-server-arm64 artifact：
+#     agent2api-server-linux-<arch>.tar.gz（+ .sha256），内含
+#     agent2api-server / ui/ / install.sh / agent2api.service /
+#     agent2api.env.example —— 与官方 Release 资产同布局，解包后
+#     `sudo bash install.sh` 即可安装；tar.gz 同时是容器内一键更新的载荷。
+#   · docker-image artifact：镜像 tar（docker save），docker load 即用。
+#     不推任何 registry，避免凭据依赖。
+#
+# ── 编译链 ──────────────────────────────────────────────────
+# 与 Dockerfile 完全同源：amd64 原生、arm64 用 aarch64-unknown-linux-gnu
+# 交叉（同一份工具链配置，与官方 CI 产物行为一致）。不加 --locked 之外的
+# 花活，不传 --features —— 本仓 crate 无条件 feature。
+#
+# ── 触发 ────────────────────────────────────────────────────
+# workflow_dispatch 手动触发即可用；推 main/beta 且改动 src-tauri 时也会跑。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, beta]
+    paths:
+      - 'desktop-tauri/src-tauri/**'
+      - 'Dockerfile'
+      - '.github/workflows/linux-server-build.yml'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  linux-server:
+    name: Linux 服务端包 (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            rust_target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            rust_target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop-tauri/src-tauri -> ../../target
+          key: ${{ matrix.rust_target }}
+          cache-on-failure: true
+
+      # arm64 交叉工具链（Dockerfile 同款：cc 走 aarch64-linux-gnu-gcc）
+      - name: 安装交叉编译工具链（arm64）
+        if: matrix.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> "$GITHUB_ENV"
+
+      - name: 编译 agent2api-server
+        working-directory: desktop-tauri/src-tauri
+        run: |
+          # crate 的 .cargo/config.toml 已把 target-dir 钉在仓库根的 target/，
+          # 这里显式传参只是保持与 Dockerfile 同一句式
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            cargo build --locked --release -p agent2api-server \
+              --target aarch64-unknown-linux-gnu --target-dir ../../target
+            cp ../../target/aarch64-unknown-linux-gnu/release/agent2api-server \
+               ../../target/server-bin
+          else
+            cargo build --locked --release -p agent2api-server --target-dir ../../target
+            cp ../../target/release/agent2api-server ../../target/server-bin
+          fi
+
+      - name: 组装服务端包（官方资产布局）
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/pkg"
+          # 编译步骤把二进制归位到了 target/server-bin（--target-dir 指向仓库根的 target/）
+          cp target/server-bin "dist/pkg/agent2api-server"
+          cp -r desktop-tauri/ui "dist/pkg/ui"
+          cp packaging/linux/install.sh "dist/pkg/"
+          cp packaging/linux/agent2api.service "dist/pkg/"
+          cp packaging/linux/agent2api.env.example "dist/pkg/"
+          cp LICENSE "dist/pkg/"
+          chmod +x "dist/pkg/agent2api-server" "dist/pkg/install.sh"
+          cd dist/pkg
+          tar -czf "../agent2api-server-linux-${{ matrix.arch }}.tar.gz" \
+            agent2api-server ui install.sh agent2api.service agent2api.env.example LICENSE
+          cd ..
+          sha256sum "agent2api-server-linux-${{ matrix.arch }}.tar.gz" \
+            > "agent2api-server-linux-${{ matrix.arch }}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-server-${{ matrix.arch }}
+          path: |
+            dist/agent2api-server-linux-*.tar.gz
+            dist/agent2api-server-linux-*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  docker-image:
+    name: Docker 镜像（linux/${{ matrix.arch }}，导出 tar）
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+          - arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v4
+
+      # 与 Dockerfile 同一条构建链（多阶段），不推 registry，按平台导出
+      # 成本地 tar 供 docker load 使用（type=docker 导出不支持多平台单包，
+      # 所以按平台拆开 —— 与官方 compose 用法 docker load 后行为一致）。
+      # arm64 的编译由 builder 阶段原生 amd64 交叉完成（Dockerfile 设计），
+      # 不走 QEMU；仅 runtime 层的 apt-get 进 QEMU，耗时可接受。
+      - name: 构建并导出镜像（linux/${{ matrix.arch }}）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          push: false
+          outputs: type=docker,dest=agent2api-image-linux-${{ matrix.arch }}.tar,force-compression=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: 计算校验值
+        run: sha256sum "agent2api-image-linux-${{ matrix.arch }}.tar" > "agent2api-image-linux-${{ matrix.arch }}.tar.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: docker-image-${{ matrix.arch }}
+          path: |
+            agent2api-image-linux-*.tar
+            agent2api-image-linux-*.tar.sha256
+          if-no-files-found: error
+          retention-days: 14

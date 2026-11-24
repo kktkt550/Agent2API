@@ -14,6 +14,7 @@ Depois de instalar, qualquer forma é gerenciada pelo **painel no navegador** (c
 - [Docker](#docker)
 - [Verificação e conexão do cliente](#verificação-e-conexão-do-cliente)
 - [Acesso pela rede](#acesso-pela-rede)
+- [Cloudflare Tunnel (opcional)](#cloudflare-tunnel-opcional)
 - [Celular](#celular)
 
 ## Qual forma escolher
@@ -266,6 +267,28 @@ print(resp.choices[0].message.content)
 O aplicativo desktop escuta apenas em `127.0.0.1` por padrão. Em "Configurações → Gateway → Acesso pela rede", ative "Permitir que outros dispositivos acessem o gateway" para escutar em todas as interfaces IPv4 (`0.0.0.0`). **Isso não restringe o acesso à rede local nem expõe o gateway automaticamente à internet**. O alcance real depende de rotas, encaminhamento de portas e firewall. A interface exibe separadamente os endereços da API e do painel web desta máquina. Use um endereço alcançável pelo dispositivo que vai se conectar; o endereço exibido não garante acesso pela internet. É necessário registrar um administrador do painel antes. A API de gerenciamento exige uma sessão de administrador ou chave do gateway; chamadas à API exigem uma chave ativa, criada automaticamente como padrão se necessário. O painel web fica desativado por padrão. Alterar qualquer uma das opções exige reiniciar o aplicativo.
 
 Os pacotes desktop incluem os recursos `ui/` do painel web. Ao ativar "Também expor o painel de gerenciamento web", dispositivos que alcançam o gateway podem abrir o painel no navegador e entrar. O alcance de acesso é o mesmo do gateway. Desativar essa opção apenas interrompe o fornecimento da interface web; o encaminhamento da API e o gerenciamento desktop local continuam disponíveis. **A janela desktop usa uma sessão local independente e não exige um login web adicional**. O acesso pelo navegador exige uma conta de administrador.
+
+<a id="cloudflare-tunnel-opcional"></a>
+
+## Cloudflare Tunnel (opcional)
+
+Quando você quer que o gateway seja acessível pela internet sem abrir redirecionamento de portas no servidor ou na banda larga residencial, deixe o próprio gateway subir um Cloudflare Tunnel: passe `AGENT2API_CLOUDFLARED_ENABLED=1` ao processo do gateway (servidor: no arquivo env; Docker: no `environment` do compose). Após a inicialização ele faz o resto automaticamente — baixa o executável cloudflared para a sua plataforma do [Release oficial](https://github.com/cloudflare/cloudflared/releases/latest) (salvo em `{diretório de dados}/bin/`, reutilizado nas reinicializações), inicia o túnel como **processo filho** e o encerra junto com o gateway no desligamento; se o processo filho sair inesperadamente, ele é reiniciado com backoff exponencial (a partir de 3 s, limite de 5 minutos). As formas desktop, servidor headless e Docker são todas suportadas.
+
+| Variável | Descrição |
+| --- | --- |
+| `AGENT2API_CLOUDFLARED_ENABLED` | Defina `1` (ou `true` / `on`) para ativar; desligado por padrão |
+| `AGENT2API_CLOUDFLARED_TOKEN` | Token de um túnel nomeado (console do Cloudflare Zero Trust → Networks → Tunnels → criar túnel). Quando definido, executa `tunnel run`; configure o roteamento do hostname no console. **O token vai apenas para o ambiente do processo filho — nunca para a linha de comando ou logs.** Sem ele, usa-se o Quick Tunnel |
+| `AGENT2API_CLOUDFLARED_URL` | URL do serviço local para onde o túnel encaminha; o padrão é `http://127.0.0.1:{porta do gateway}` (ou seja, o próprio gateway, então `https://<seu domínio>` leva direto ao gateway e ao painel) |
+| `AGENT2API_CLOUDFLARED_BIN` | Caminho de um executável cloudflared existente; pula o download (ambientes offline / GitHub inacessível) |
+| `AGENT2API_CLOUDFLARED_VERSION` | Versão fixada (ex.: `2026.11.2`); o padrão é `latest` |
+| `AGENT2API_CLOUDFLARED_ARGS` | Argumentos extras repassados ao cloudflared (separados por espaço; aspas duplas podem agrupar argumentos com espaços), anexados após os internos |
+
+**Dois modos**:
+
+- **Quick Tunnel (temporário)**: o padrão quando `AGENT2API_CLOUDFLARED_TOKEN` não está definido — **não precisa de conta Cloudflare**. Um túnel anônimo é registrado automaticamente e a URL pública (`https://xxx.trycloudflare.com`) aparece no log de execução (pesquise `Cloudflared` na página "Logs"). A URL é aleatória e **muda a cada reinicialização**; serve apenas para testes, demonstrações rápidas e verificação de conectividade.
+- **Túnel nomeado (recomendado em produção)**: crie um túnel no console do [Cloudflare Zero Trust](https://one.dash.cloudflare.com/), coloque o token exibido em `AGENT2API_CLOUDFLARED_TOKEN` e roteie seu hostname para `http://localhost:{porta do gateway}` em Public Hostname (a URL do serviço aponta para a máquina/contêiner do gateway). O endereço é estável e o acesso do cliente continua igual — basta trocar `base_url` para `https://<seu domínio>/v1`.
+
+Nota de segurança: o túnel expõe a **porta inteira do gateway** (painel + `/v1`) à internet. O painel tem login e verificação humana, e `/v1` é protegido por chaves de API. Se quiser expor apenas a API, defina `AGENT2API_PANEL_PORT` para separar o painel em outra porta e roteie apenas a porta principal no console do Cloudflare, ou aponte o túnel para outro endereço com `AGENT2API_CLOUDFLARED_URL`. A saída do túnel em si não precisa de proxy.
 
 ## Celular
 

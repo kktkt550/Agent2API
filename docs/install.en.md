@@ -14,6 +14,7 @@ Every form is managed from the **browser panel** afterwards (accounts, gateway k
 - [Docker](#docker)
 - [Verification and client setup](#verification-and-client-setup)
 - [Network access](#network-access)
+- [Cloudflare Tunnel (optional)](#cloudflare-tunnel-optional)
 - [Mobile](#mobile)
 
 ## Which form to pick
@@ -266,6 +267,28 @@ print(resp.choices[0].message.content)
 The desktop app listens only on `127.0.0.1` by default. Under "Settings → Gateway → Network access", enable "Allow other devices to access the gateway" to listen on all IPv4 interfaces (`0.0.0.0`). **This does not restrict access to the LAN or automatically expose the gateway to the internet**; actual reachability depends on routing, port forwarding, and firewall settings. The UI displays separate API and web management addresses for this machine. Use an address reachable from the connecting device; the displayed address does not guarantee public internet access. A panel administrator must be registered first. Management endpoints require an admin session or gateway key; API calls require an enabled gateway key, with a default key created automatically if needed. The web management panel is off by default. Either switch requires an app restart.
 
 Desktop packages include the web panel's `ui/` resources. Enabling "Also expose the web management panel" lets devices that can reach the gateway open the panel in a browser and sign in. Its access scope is the same as the gateway's. Disabling it only stops serving the web UI; API forwarding and local desktop management remain available. **The desktop window uses its own local session and does not require a separate web sign-in**; browser access requires an administrator account.
+
+<a id="cloudflare-tunnel-optional"></a>
+
+## Cloudflare Tunnel (optional)
+
+When you want the gateway reachable from the internet without opening port mappings on your server or home broadband, let the gateway bring up a Cloudflare Tunnel itself: hand `AGENT2API_CLOUDFLARED_ENABLED=1` to the gateway process (server: put it in the env file; Docker: put it in compose `environment`). After startup it does the rest automatically — downloads the cloudflared executable for your platform from the [official cloudflared Release](https://github.com/cloudflare/cloudflared/releases/latest) (saved under `{data directory}/bin/` and reused on restart), starts the tunnel as a **child process**, and stops it together with the gateway on shutdown; if the child exits unexpectedly it is restarted with exponential backoff (from 3 s, capped at 5 minutes). Desktop, headless server and Docker forms are all supported.
+
+| Variable | Description |
+| --- | --- |
+| `AGENT2API_CLOUDFLARED_ENABLED` | Set `1` (or `true` / `on`) to enable; off by default |
+| `AGENT2API_CLOUDFLARED_TOKEN` | Token of a named tunnel (Cloudflare Zero Trust console → Networks → Tunnels → create a tunnel). When set, runs `tunnel run`; configure the hostname routing in the console. **The token only goes into the child process environment — never the command line or logs.** When unset, Quick Tunnel is used |
+| `AGENT2API_CLOUDFLARED_URL` | Local service URL the tunnel forwards to; defaults to `http://127.0.0.1:{gateway port}` (i.e. the gateway itself, so `https://<your domain>` leads straight to the gateway and panel) |
+| `AGENT2API_CLOUDFLARED_BIN` | Path to an existing cloudflared executable; skips the download (offline environments / GitHub unreachable) |
+| `AGENT2API_CLOUDFLARED_VERSION` | Pinned version (e.g. `2026.11.2`); defaults to `latest` |
+| `AGENT2API_CLOUDFLARED_ARGS` | Extra raw arguments passed to cloudflared (space-separated; double quotes may group arguments containing spaces), appended after the built-in ones |
+
+**Two modes**:
+
+- **Quick Tunnel (temporary)**: the default when `AGENT2API_CLOUDFLARED_TOKEN` is unset — **no Cloudflare account needed**. An anonymous tunnel is registered automatically and its public URL (`https://xxx.trycloudflare.com`) is written to the run log (search `Cloudflared` on the "Logs" page). The URL is random and **changes on every restart**; good for trials, quick demos and connectivity checks only.
+- **Named tunnel (recommended for production)**: create a tunnel in the [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) console, put the token it shows into `AGENT2API_CLOUDFLARED_TOKEN`, and route your hostname to `http://localhost:{gateway port}` under Public Hostname (the service URL points at the machine/container running the gateway). The address is stable; client setup stays the same — just switch `base_url` to `https://<your domain>/v1`.
+
+Security note: the tunnel exposes the **whole gateway port** (panel + `/v1`) to the internet. The panel has sign-in and human verification, and `/v1` is guarded by API keys. If you only want the API exposed, set `AGENT2API_PANEL_PORT` to split the panel onto its own port and route only the main port in the Cloudflare console, or point the tunnel elsewhere with `AGENT2API_CLOUDFLARED_URL`. The tunnel egress itself needs no proxy configuration.
 
 ## Mobile
 

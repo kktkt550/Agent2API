@@ -84,6 +84,9 @@ pub mod capability;
 pub mod checkin_history;
 pub mod checkin_records;
 pub mod checkin_schedules;
+// Cloudflare Tunnel（cloudflared）的可选守护：环境变量开关 + 按平台自动下载
+// + 子进程监管，随网关停机一起退出，见该模块头
+pub mod cloudflared;
 pub mod clash;
 pub mod client;
 pub(crate) mod compact_routing;
