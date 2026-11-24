@@ -87,7 +87,7 @@ AGENT2API_CLOUDFLARED_TOKEN=eyJhbGciOi...
 | `AGENT2API_CLOUDFLARED_URL` | `http://127.0.0.1:{网关端口}` | 隧道转发到的本机地址；一般不用改 |
 | `AGENT2API_CLOUDFLARED_BIN` | 自动下载 | 已有 cloudflared 的路径（离线环境 / GitHub 不可达时用），设置后跳过下载 |
 | `AGENT2API_CLOUDFLARED_VERSION` | `latest` | 钉版本（如 `2026.11.2`），避免 latest 重定向变化 |
-| `AGENT2API_CLOUDFLARED_ARGS` | 空 | 追加给 cloudflared 的原始参数（空格分隔，双引号可包空格参数） |
+| `AGENT2API_CLOUDFLARED_ARGS` | 空 | 追加给 cloudflared 的原始参数（空格分隔，双引号可包空格参数）。内置默认带 `--protocol http2`（隧道传输走 TCP 443，兼容性比默认 QUIC 好——很多网络拦 UDP）；要换回 QUIC 设 `--protocol quic` 覆盖 |
 
 ### 6. 安全清单（公网部署必读）
 

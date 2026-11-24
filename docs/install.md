@@ -295,7 +295,7 @@ print(resp.choices[0].message.content)
 | `AGENT2API_CLOUDFLARED_URL` | 隧道转发到的本机服务地址，默认 `http://127.0.0.1:{网关端口}`（即转发给网关自身，公网入口 `https://<你的域名>` 直通网关与面板） |
 | `AGENT2API_CLOUDFLARED_BIN` | 已有 cloudflared 可执行文件的路径；设置后跳过下载（离线环境 / GitHub 不可达时用） |
 | `AGENT2API_CLOUDFLARED_VERSION` | 钉住的版本号（如 `2026.11.2`）；默认 `latest` |
-| `AGENT2API_CLOUDFLARED_ARGS` | 追加给 cloudflared 的原始参数（空格分隔，双引号可包含空格的参数），排在内置参数之后 |
+| `AGENT2API_CLOUDFLARED_ARGS` | 追加给 cloudflared 的原始参数（空格分隔，双引号可包含空格的参数），排在内置参数之后。内置默认带 `--protocol http2`（QUIC 在部分网络下被 UDP 拦截，HTTP/2 走 TCP 443 更稳）；要换回 QUIC 设为 `--protocol quic` 即可覆盖 |
 
 **两种模式**：
 

@@ -570,13 +570,23 @@ async fn spawn_and_watch(
 /// 也不落任何日志）；quick tunnel 用 `--url` 指转发目标。`--no-autoupdate`
 /// 必带：cloudflared 的自我更新会脱离我们的监管换进程，更新节奏由网关
 /// 的下载逻辑管（删掉 bin/ 下的文件重下即可）。
+///
+/// ── 为什么默认 `--protocol http2` ──────────────────────────
+/// cloudflared 的默认传输协议是 **QUIC**（UDP 7844/443）。不少网络环境
+/// （企业防火墙、部分运营商 NAT、Windows Server 自带的 UDP 限速）会拦或
+/// 抖掉 UDP，表现为隧道反复重连、Quick Tunnel 起不来 —— 而这些问题在
+/// `--protocol http2`（TCP 443，与普通 HTTPS 同路）下都不存在。HTTP/2
+/// 模式在多数部署里更稳，代价只是极高并发下吞吐略低于 QUIC，对「网关
+/// 转发」这种流量形态可以忽略。要换回 QUIC 用
+/// `AGENT2API_CLOUDFLARED_ARGS=--protocol quic` 覆盖（追加参数排在内置
+/// 之后，Go flag 后者生效）。
 fn build_command(
     bin: &Path,
     settings: &TunnelSettings,
     target_url: &str,
 ) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(bin);
-    command.arg("tunnel").arg("--no-autoupdate");
+    command.arg("tunnel").arg("--no-autoupdate").arg("--protocol").arg("http2");
     if settings.has_token() {
         if let Some(token) = &settings.token {
             command.env("TUNNEL_TOKEN", token);
@@ -966,5 +976,56 @@ mod tests {
             Some("tok-123".to_string()),
             "token 必须进子进程环境变量，不进命令行"
         );
+    }
+
+    /// 默认传输协议是 http2（QUIC 在不少网络下被 UDP 拦截，http2 走 TCP 443
+    /// 兼容性最好）；用户可用 AGENT2API_CLOUDFLARED_ARGS 追加 --protocol quic
+    /// 覆盖 —— 追加参数排在内置之后，Go flag 后者生效。
+    #[test]
+    fn the_default_protocol_is_http2_and_user_args_can_override() {
+        let default = TunnelSettings {
+            enabled: true,
+            token: None,
+            url: None,
+            bin: None,
+            version: "latest".into(),
+            extra_args: vec![],
+        };
+        let cmd = build_command(Path::new("cloudflared"), &default, "http://127.0.0.1:3065");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        let protocol_position = args.iter().position(|arg| arg == "--protocol");
+        assert_eq!(
+            protocol_position.map(|index| args[index + 1].as_str()),
+            Some("http2"),
+            "内置 --protocol http2 必须存在且值为 http2；实际参数: {args:?}"
+        );
+        assert!(
+            protocol_position.unwrap() < args.iter().position(|arg| arg == "--no-autoupdate").unwrap() + 4,
+            "--protocol 应排在内置参数段"
+        );
+
+        // 用户覆盖：追加 --protocol quic 排在后面
+        let override_settings = TunnelSettings {
+            enabled: true,
+            token: None,
+            url: None,
+            bin: None,
+            version: "latest".into(),
+            extra_args: vec!["--protocol".into(), "quic".into()],
+        };
+        let cmd = build_command(Path::new("cloudflared"), &override_settings, "http://127.0.0.1:3065");
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        let first = args.iter().position(|arg| arg == "--protocol").unwrap();
+        let last = args.iter().rposition(|arg| arg == "--protocol").unwrap();
+        assert!(first < last, "用户的 --protocol 必须排在内置之后（Go flag 后者生效）；实际参数: {args:?}");
+        assert_eq!(args[last + 1], "quic");
     }
 }
