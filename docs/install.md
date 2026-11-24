@@ -304,6 +304,8 @@ print(resp.choices[0].message.content)
 
 安全提醒：隧道会把网关**整个端口**（面板 + `/v1`）暴露到公网，面板有登录与人机验证、`/v1` 有 API Key 认证兜底；若只想暴露 API，把 `AGENT2API_PANEL_PORT` 设为分端口并在 Cloudflare 控制台只路由主端口，或用 `AGENT2API_CLOUDFLARED_URL` 把隧道指向一个不含管理面的地址。隧道出口本身不需要配代理。
 
+> **更详细的部署指南**（Quick Tunnel / 具名隧道完整步骤、排障清单、Relay 代理池出站中转的一键部署与区域切换、公网 + Relay 组合部署示例）见 [Cloudflare 部署指南](./deploy-cloudflare.md)。「网络代理」页新增的 Cloudflare Relay 类型条目（出站经 Cloudflare Worker 中转，一键部署 + 区域切换）也记录在那份文档里。
+
 ## 手机端
 
 手机端有三种形态，按需要选：
